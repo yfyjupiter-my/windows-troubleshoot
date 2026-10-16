@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from contextlib import contextmanager
 from dataclasses import replace
 
@@ -30,31 +31,60 @@ _HIDDEN, _SYSTEM = 0x2, 0x4  # FILE_ATTRIBUTE_HIDDEN / FILE_ATTRIBUTE_SYSTEM
 _SC_START = {"auto": "auto", "manual": "demand", "disabled": "disabled", "boot": "boot", "system": "system"}
 _EXPLORER = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
 _E_ACCESSDENIED = -2147024891  # HRESULT 0x80070005
-_SERVICES_PS = ("Get-CimInstance Win32_Service | Select Name,DisplayName,PathName,StartMode,State"
-                " | ConvertTo-Json")
-_TASKS_PS = ("Get-ScheduledTask | Select TaskPath,TaskName,State,Author,@{n='Command';e={($_.Actions | "
-             "% { \"$($_.Execute) $($_.Arguments)\".Trim() }) -join ' ; '}} | ConvertTo-Json")
+_REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT (junctions, symlinks)
+_DELETE = 0x00010000  # standard DELETE access right
+_ERROR_NOT_SAME_DEVICE = 17
+# -ErrorAction SilentlyContinue: one corrupt service/task must not lose the whole listing
+_SERVICES_PS = ("Get-CimInstance Win32_Service -ErrorAction SilentlyContinue"
+                " | Select Name,DisplayName,PathName,StartMode,State | ConvertTo-Json")
+_TASKS_PS = ("Get-ScheduledTask -ErrorAction SilentlyContinue | Select TaskPath,TaskName,State,Author,"
+             "@{n='Command';e={($_.Actions | % { \"$($_.Execute) $($_.Arguments)\".Trim() }) -join ' ; '}}"
+             " | ConvertTo-Json")
 _SIGNATURE_PS = ("Get-AuthenticodeSignature -LiteralPath {path} | Select Status,"
                  "@{{n='Publisher';e={{$_.SignerCertificate.Subject}}}} | ConvertTo-Json")
-# Ownership step is best effort: when we already own the key (HKCU UserChoice) it may be refused
-# and the ACL step still succeeds. Keys owned by TrustedInstaller (HKLM) need an elevated process.
+# Elevated tokens hold SeTakeOwnership/SeRestore *disabled*, and .NET does not enable them.
+_ENABLE_PRIVILEGES_PS = (
+    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; "
+    "public static class AtPriv { "
+    "[StructLayout(LayoutKind.Sequential, Pack = 1)] struct TP { public int Count; public long Luid; public int Attr; } "
+    "[DllImport(\"kernel32.dll\")] static extern IntPtr GetCurrentProcess(); "
+    "[DllImport(\"advapi32.dll\", SetLastError = true)] "
+    "static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token); "
+    "[DllImport(\"advapi32.dll\", SetLastError = true, CharSet = CharSet.Unicode)] "
+    "static extern bool LookupPrivilegeValue(string host, string name, out long luid); "
+    "[DllImport(\"advapi32.dll\", SetLastError = true)] "
+    "static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TP state, int len, "
+    "IntPtr prev, IntPtr retLen); "
+    "public static bool Enable(string name) { IntPtr token; TP tp = new TP(); tp.Count = 1; tp.Attr = 2; "
+    "if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) return false; "
+    "if (!LookupPrivilegeValue(null, name, out tp.Luid)) return false; "
+    "return AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero) "
+    "&& Marshal.GetLastWin32Error() == 0; } }'; "
+    "foreach ($p in 'SeTakeOwnershipPrivilege','SeRestorePrivilege') "
+    "{ if (-not [AtPriv]::Enable($p)) { Write-Output \"could not enable $p\" } }; ")
+# Expects $hive (RegistryHive name) and $sub. Step 1 sets us as owner (needs the privilege above
+# unless we already have WRITE_OWNER); step 2 drops Deny ACEs and grants us FullControl, which also
+# works when we already own the key (HKCU UserChoice). HKLM keys owned by TrustedInstaller need admin.
 _TAKE_OWNERSHIP_PS = (
-    "try {{ $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::{hive},"
+    "try { $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]$hive,"
     "[Microsoft.Win32.RegistryView]::Registry64); "
     "$me=[Security.Principal.WindowsIdentity]::GetCurrent().User; "
     "$R=[Security.AccessControl.RegistryRights]; $T=[Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree; "
-    "try {{ $k=$base.OpenSubKey({sub},$T,$R::TakeOwnership); if (-not $k) {{ exit 3 }}; "
+    "try { $k=$base.OpenSubKey($sub,$T,$R::TakeOwnership); if (-not $k) { exit 3 }; "
     "$acl=$k.GetAccessControl([Security.AccessControl.AccessControlSections]::None); "
-    "$acl.SetOwner($me); $k.SetAccessControl($acl); $k.Close() }} catch {{ }}; "
-    "$k=$base.OpenSubKey({sub},$T,$R::ChangePermissions -bor $R::ReadPermissions); if (-not $k) {{ exit 3 }}; "
+    "$acl.SetOwner($me); $k.SetAccessControl($acl); $k.Close() } "
+    "catch { Write-Output ('take ownership failed: ' + $_.Exception.Message) }; "
+    "$k=$base.OpenSubKey($sub,$T,$R::ChangePermissions -bor $R::ReadPermissions); if (-not $k) { exit 3 }; "
     "$acl=$k.GetAccessControl(); "
     "foreach ($r in @($acl.GetAccessRules($true,$false,[Security.Principal.SecurityIdentifier]))) "
-    "{{ if ($r.AccessControlType -eq 'Deny') {{ [void]$acl.RemoveAccessRuleSpecific($r) }} }}; "
+    "{ if ($r.AccessControlType -eq 'Deny') { [void]$acl.RemoveAccessRuleSpecific($r) } }; "
     "$acl.AddAccessRule((New-Object Security.AccessControl.RegistryAccessRule($me,'FullControl',"
-    "'ContainerInherit','None','Allow'))); $k.SetAccessControl($acl); $k.Close() }} "
-    "catch [System.UnauthorizedAccessException],[System.Security.SecurityException] {{ exit 5 }} "
-    "catch {{ Write-Output $_.Exception.ToString(); exit 1 }}")
+    "'ContainerInherit','None','Allow'))); $k.SetAccessControl($acl); $k.Close() } "
+    "catch [System.UnauthorizedAccessException],[System.Security.SecurityException] "
+    "{ Write-Output $_.Exception.Message; exit 5 } "
+    "catch { Write-Output $_.Exception.ToString(); exit 1 }")
 _NET_HIVES = {"HKLM": "LocalMachine", "HKCU": "CurrentUser", "HKCR": "ClassesRoot"}
+_STAGING = ".apptriage-moving-"
 
 
 # ---- subprocesses (the only place processes are started, except launch) ---------------------
@@ -91,6 +121,12 @@ def _check(proc: subprocess.CompletedProcess, what: str, missing: tuple[int, ...
     if proc.returncode == 5 or looks_access_denied(output):
         raise AccessDenied(what)
     raise OSError(f"{what}: {output or f'exit code {proc.returncode}'}")
+
+
+def _listing(script: str, what: str) -> str:
+    """Partial output beats none: a non-zero exit with JSON on stdout still counts."""
+    proc = _powershell(script)
+    return proc.stdout if proc.stdout.strip() else _check(proc, what)
 
 
 @contextmanager
@@ -144,12 +180,12 @@ def _value_type(key, name: str, value: object) -> int:
     raise TypeError(f"unsupported registry value type: {type(value).__name__}")
 
 
-def _delete_tree(root, sub: str) -> None:
-    with winreg.OpenKeyEx(root, sub, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+def _subtree_deletable(root, sub: str) -> list[str]:
+    """Every key under sub (children first), each opened with DELETE so a refusal surfaces up front."""
+    with winreg.OpenKeyEx(root, sub, 0, winreg.KEY_READ | _DELETE | winreg.KEY_WOW64_64KEY) as key:
         children = _enum(winreg.EnumKey, key)
-    for child in children:
-        _delete_tree(root, f"{sub}\\{child}")
-    winreg.DeleteKeyEx(root, sub, winreg.KEY_WOW64_64KEY, 0)
+    keys = [k for child in children for k in _subtree_deletable(root, f"{sub}\\{child}")]
+    return [*keys, sub]
 
 
 def _long_name(path: str) -> str:
@@ -161,6 +197,16 @@ def _long_name(path: str) -> str:
         return win32api.GetLongPathName(path)
     except Exception:  # noqa: BLE001 - best effort; the short name still works as a path
         return path
+
+
+def _remove(path: str) -> None:
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.lexists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _com_denied(e: Exception) -> bool:
@@ -211,8 +257,10 @@ class WindowsSystem:
         hive, sub = split_reg_path(path)
         if not sub:
             raise ValueError(f"refusing to delete a registry hive: {path}")
+        root = _hive_handle(hive)
         with _translate(path):
-            _delete_tree(_hive_handle(hive), sub)
+            for key in _subtree_deletable(root, sub):  # nothing is deleted unless all of it can be
+                winreg.DeleteKeyEx(root, key, winreg.KEY_WOW64_64KEY, 0)
 
     def reg_export(self, path: str, dest_file: str) -> None:
         with _translate(path), _open(path, winreg.KEY_READ):
@@ -227,7 +275,8 @@ class WindowsSystem:
     def reg_take_ownership(self, path: str) -> None:
         """Own the key and grant ourselves FullControl, dropping Deny ACEs. HKLM keys need admin."""
         hive, sub = split_reg_path(path)
-        _check(_powershell(_TAKE_OWNERSHIP_PS.format(hive=_NET_HIVES[hive], sub=ps_quote(sub))), path)
+        script = f"$hive='{_NET_HIVES[hive]}'; $sub={ps_quote(sub)}; " + _ENABLE_PRIVILEGES_PS + _TAKE_OWNERSHIP_PS
+        _check(_powershell(script), path)
 
     # ---- environment ----------------------------------------------------
     def _shell_folders(self, hive: str) -> dict[str, str]:
@@ -274,7 +323,9 @@ class WindowsSystem:
                 for e in it:
                     try:
                         st = e.stat(follow_symlinks=False)
-                        is_dir, attrs, size = e.is_dir(), getattr(st, "st_file_attributes", 0), st.st_size
+                        attrs, size = getattr(st, "st_file_attributes", 0), st.st_size
+                        # junctions/symlinks are not directories to us, so walks never follow them
+                        is_dir = e.is_dir() and not attrs & _REPARSE_POINT
                     except OSError:
                         is_dir, attrs, size = False, 0, 0
                     entries.append(DirEntry(e.name, e.path, is_dir, bool(attrs & _HIDDEN),
@@ -294,8 +345,30 @@ class WindowsSystem:
         if os.path.lexists(dst):
             raise FileExistsError(dst)
         with _translate(src):
-            os.makedirs(ntpath.dirname(ntpath.normpath(dst)), exist_ok=True)
-            shutil.move(src, dst)
+            os.makedirs(os.path.dirname(os.path.normpath(dst)), exist_ok=True)
+            try:
+                os.rename(src, dst)  # not shutil.move: its copy+rmtree fallback can half-delete src
+                return
+            except OSError as e:
+                if getattr(e, "winerror", None) != _ERROR_NOT_SAME_DEVICE:
+                    raise
+            self._move_across_volumes(src, dst)
+
+    @staticmethod
+    def _move_across_volumes(src: str, dst: str) -> None:
+        """All or nothing: the staging rename fails cleanly if anything inside src is locked."""
+        staged = f"{os.path.normpath(src)}{_STAGING}{uuid.uuid4().hex[:8]}"
+        os.rename(src, staged)
+        try:
+            if os.path.isdir(staged) and not os.path.islink(staged):
+                shutil.copytree(staged, dst, symlinks=True)
+            else:
+                shutil.copy2(staged, dst, follow_symlinks=False)
+        except BaseException:
+            _remove(dst)
+            os.rename(staged, src)
+            raise
+        _remove(staged)  # dst is complete; anything that cannot be removed stays beside src
 
     def read_text(self, path: str) -> str:
         if os.path.isdir(path):
@@ -305,7 +378,7 @@ class WindowsSystem:
 
     # ---- services and scheduled tasks ----------------------------------
     def list_services(self) -> list[ServiceInfo]:
-        services = parse_service_json(_check(_powershell(_SERVICES_PS), "Win32_Service"))
+        services = parse_service_json(_listing(_SERVICES_PS, "Win32_Service"))
         return [replace(s, binary_path=self.expand_env(normalize_image_path(s.binary_path)))
                 for s in services]
 
@@ -316,12 +389,14 @@ class WindowsSystem:
         _check(_native(["sc.exe", "config", name, "start=", _SC_START[start_type]]), name, missing=(1060,))
 
     def list_tasks(self) -> list[TaskInfo]:
-        return parse_tasks_json(_check(_powershell(_TASKS_PS), "ScheduledTasks"))
+        return parse_tasks_json(_listing(_TASKS_PS, "ScheduledTasks"))
 
     def set_task_enabled(self, path: str, enabled: bool) -> None:
         folder, name = split_task_path(path)
         verb = "Enable" if enabled else "Disable"
-        script = (f"$t=Get-ScheduledTask -TaskPath {ps_quote(folder)} -TaskName {ps_quote(name)} "
+        # -TaskPath/-TaskName take wildcard patterns; task names may contain [ ]
+        script = (f"$t=Get-ScheduledTask -TaskPath ([WildcardPattern]::Escape({ps_quote(folder)})) "
+                  f"-TaskName ([WildcardPattern]::Escape({ps_quote(name)})) "
                   "-ErrorAction SilentlyContinue; if (-not $t) { exit 3 }; "
                   f"try {{ $t | {verb}-ScheduledTask -ErrorAction Stop | Out-Null }} "
                   "catch { if ($_.CategoryInfo.Category -eq 'PermissionDenied') { exit 5 }; "
@@ -335,11 +410,13 @@ class WindowsSystem:
             return self._signatures[key]
         if not os.path.isfile(file_path):
             return SignatureInfo("unknown", "")
-        proc = _powershell(_SIGNATURE_PS.format(path=ps_quote(file_path)))
-        try:
-            info = parse_signature_json(proc.stdout) if proc.returncode == 0 else SignatureInfo("unknown", "")
-        except ValueError:
-            info = SignatureInfo("unknown", "")
+        try:  # failures are "unknown" and not cached, so a later call may still succeed
+            proc = _powershell(_SIGNATURE_PS.format(path=ps_quote(file_path)))
+            if proc.returncode != 0:
+                return SignatureInfo("unknown", "")
+            info = parse_signature_json(proc.stdout)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return SignatureInfo("unknown", "")
         self._signatures[key] = info
         return info
 
