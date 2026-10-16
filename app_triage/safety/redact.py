@@ -1,14 +1,19 @@
 """Redaction of the local user name before any text leaves the machine."""
 import re
 
-# Characters that may legitimately follow a user-profile folder name in a path
-# or command line. Anything else means the folder name is longer (tester2).
-_END = r"""(?=[\\/]|$|[\s"'<>|:;,)\]])"""
-
 
 def redact(text: str, username: str) -> str:
-    """Replace ``\\Users\\<username>`` (either slash style, any case) with ``\\Users\\%USER%``."""
+    """Replace the user-profile folder name in ``\\Users\\<username>`` with ``%USER%``.
+
+    Matching is case-insensitive and accepts either slash style. Only the name itself
+    is replaced; the surrounding separators are kept exactly as written, so
+    JSON-escaped paths (``C:\\\\Users\\\\name``) stay valid JSON. A longer name that merely
+    starts with the username (``tester2``) is left alone, but ``tester.PC`` or
+    ``tester-PC`` are still redacted.
+    """
     if not username:
         return text
-    pattern = re.compile(r"[\\/]+Users[\\/]+" + re.escape(username) + _END, re.IGNORECASE)
-    return pattern.sub(lambda _m: r"\Users\%USER%", text)
+    pattern = re.compile(
+        r"([\\/]Users[\\/]+)" + re.escape(username) + r"(?!\w)", re.IGNORECASE
+    )
+    return pattern.sub(lambda m: m.group(1) + "%USER%", text)

@@ -1,10 +1,12 @@
+import json
+
 from app_triage.safety.redact import redact
 
 
 def test_redact_user_paths():
     assert redact(r"C:\Users\Tester\AppData", "tester") == r"C:\Users\%USER%\AppData"
-    assert redact("C:/Users/tester/x", "tester") == r"C:\Users\%USER%/x"
-    assert redact(r"c:\users\TESTER", "Tester") == r"c:\Users\%USER%"
+    assert redact("C:/Users/tester/x", "tester") == "C:/Users/%USER%/x"
+    assert redact(r"c:\users\TESTER", "Tester") == r"c:\users\%USER%"
     # a different user is untouched, including one sharing the prefix
     assert redact(r"C:\Users\other\x", "tester") == r"C:\Users\other\x"
     assert redact(r"C:\Users\tester2\x", "tester") == r"C:\Users\tester2\x"
@@ -25,3 +27,15 @@ def test_redact_special_chars_and_unicode_username():
 
 def test_redact_empty_username_is_noop():
     assert redact(r"C:\Users\tester\x", "") == r"C:\Users\tester\x"
+
+
+def test_redact_keeps_json_encoded_paths_valid():
+    encoded = json.dumps({"p": r"C:\Users\tester\x"})
+    assert json.loads(redact(encoded, "tester")) == {"p": r"C:\Users\%USER%\x"}
+    assert redact(r"C:\\Users\\tester\\x", "tester") == r"C:\\Users\\%USER%\\x"
+
+
+def test_redact_computer_suffixed_profile_names():
+    assert redact(r"C:\Users\tester.DESKTOP-ABC\x", "tester") == r"C:\Users\%USER%.DESKTOP-ABC\x"
+    assert redact(r"C:\Users\tester-PC\x", "tester") == r"C:\Users\%USER%-PC\x"
+    assert redact(r"C:\Users\tester_2\x", "tester") == r"C:\Users\tester_2\x"
