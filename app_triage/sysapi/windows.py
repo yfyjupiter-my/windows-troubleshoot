@@ -95,10 +95,11 @@ def _system32(rel: str) -> str:
     return path if os.path.exists(path) else ntpath.basename(rel)
 
 
-def _run(args: list[str], encoding: str = "utf-8", timeout: float = 180) -> subprocess.CompletedProcess:
+def _run(args: list[str], encoding: str = "utf-8", timeout: float = 180,
+         env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     # stdin=DEVNULL: a --windowed exe has no valid console handles to inherit
     return subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, encoding=encoding,
-                          errors="replace", creationflags=_NO_WINDOW, timeout=timeout)
+                          errors="replace", creationflags=_NO_WINDOW, timeout=timeout, env=env)
 
 
 def _native(args: list[str]) -> subprocess.CompletedProcess:
@@ -107,8 +108,11 @@ def _native(args: list[str]) -> subprocess.CompletedProcess:
 
 
 def _powershell(script: str, timeout: float = 180) -> subprocess.CompletedProcess:
+    # An inherited PSModulePath (e.g. when started from PowerShell 7) makes Windows PowerShell 5.1
+    # load PS7 modules it can't use; without it 5.1 rebuilds its own default module path.
+    env = {k: v for k, v in os.environ.items() if k.lower() != "psmodulepath"}
     return _run([_system32(r"WindowsPowerShell\v1.0\powershell.exe"), "-NoProfile", "-NonInteractive",
-                 "-Command", _PS_PREFIX + script], timeout=timeout)
+                 "-Command", _PS_PREFIX + script], timeout=timeout, env=env)
 
 
 def _check(proc: subprocess.CompletedProcess, what: str, missing: tuple[int, ...] = (3,)) -> str:

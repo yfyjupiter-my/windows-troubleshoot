@@ -1,5 +1,4 @@
 import copy
-import tempfile
 import ntpath
 
 import pytest
@@ -17,17 +16,19 @@ WINLOGON = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 PHOTOS = "AppX43hnxtbyyps62jhe9sqpdzxn1790zetc"
 
 
-_TMP = ntpath.normcase(ntpath.normpath(tempfile.gettempdir()))
+def _related(a: str, b: str) -> bool:
+    """a and b are the same path, or one contains the other (keys are already normcased)."""
+    return any(x == y or x.startswith(y.rstrip("\\") + "\\") for x, y in ((a, b), (b, a)))
 
 
-def _near_tmp(key: str) -> bool:
-    """The quarantine folder lives under the real temp dir (on C: on Windows) — skip it and its ancestors."""
-    return any(a == b or a.startswith(b.rstrip("\\") + "\\") for a, b in ((key, _TMP), (_TMP, key)))
+def state(s: FakeSystem, session=None):
+    """Snapshot of the fake's user-visible state (C: only).
 
-
-def state(s: FakeSystem):
-    """Snapshot of the fake's user-visible state; the quarantine folder and the dirs leading to it are excluded."""
-    fs = {k: v for k, v in s._fs.items() if k.startswith("c:") and not _near_tmp(k)}
+    The quarantine folder is a real directory under pytest's tmp dir, which is on C: on Windows, so
+    pass ``session`` to also leave out that folder and the parent dirs the fake created for it.
+    """
+    skip = ntpath.normcase(ntpath.normpath(str(session.dir))) if session is not None else None
+    fs = {k: v for k, v in s._fs.items() if k.startswith("c:") and not (skip and _related(k, skip))}
     return copy.deepcopy((s._reg, fs, s._content, s._services, s._tasks, s._shortcuts))
 
 
@@ -190,13 +191,13 @@ def test_disable_task_missing_task_raises(session):
 def test_quarantine_path_roundtrip_directory(session):
     src = r"C:\Users\tester\AppData\Roaming\kingsoft"
     s = FakeSystem(); s.add_file(src + r"\a.exe", size=5, content="x"); s.add_file(src + r"\b\c.dat")
-    before = state(s)
+    before = state(s, session)
     e = apply(ActionSpec("quarantine_path", src), s, session, 4)
     dest = str(session.quarantine_dir() / "4_kingsoft")
     assert e.backup == {"original": src, "moved_to": dest}
     assert not s.path_exists(src) and s.path_exists(ntpath.join(dest, "a.exe"))
     undo(e, s, session)
-    assert state(s) == before
+    assert state(s, session) == before
 
 
 def test_quarantine_undo_refuses_to_overwrite(session):

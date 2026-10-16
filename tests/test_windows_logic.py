@@ -313,3 +313,16 @@ def test_move_missing_src_and_existing_dst(app):
     dst.write_text("x")
     with pytest.raises(FileExistsError):
         WindowsSystem().move(str(src), str(dst))
+
+
+def test_powershell_drops_inherited_psmodulepath(monkeypatch):
+    # Started from PowerShell 7, PSModulePath points at PS7 modules that Windows PowerShell 5.1
+    # can't load (Get-AuthenticodeSignature -> CouldNotAutoloadMatchingModule).
+    seen = {}
+    monkeypatch.setenv("PSModulePath", r"C:\Program Files\PowerShell\7\Modules")
+    monkeypatch.setenv("APPTRIAGE_KEEP", "1")
+    monkeypatch.setattr(windows.subprocess, "run", lambda args, **kw: seen.update(kw) or _proc(0))
+    windows._powershell("Write-Output ok")
+    env = seen["env"]
+    assert not any(k.lower() == "psmodulepath" for k in env)
+    assert env["APPTRIAGE_KEEP"] == "1"
