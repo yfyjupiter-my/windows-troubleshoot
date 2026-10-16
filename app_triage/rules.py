@@ -21,6 +21,9 @@ KNOWN_VENDORS: list[VendorRule] = [
             r"\bkso\w*",
             r"ksolaunch",
             r"wpscenter",
+            r"\bkwps",  # ProgIds: KWPS.Document.12 / KET.Sheet.12 / KWPP.Presentation.12
+            r"\bket\.",
+            r"\bkwpp",
         ),
         "常被捆绑安装，会抢占图片/PDF 默认打开方式并添加自启和后台服务",
     ),
