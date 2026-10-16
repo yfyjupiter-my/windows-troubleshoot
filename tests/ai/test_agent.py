@@ -250,3 +250,9 @@ def test_connection_ok_and_error_mapping(fake_openai, monkeypatch):
 
 def test_backend_can_be_built_without_api_key():
     DeepSeekBackend(Config(api_key=""))  # first launch: no key yet must not raise
+
+
+def test_ask_redacts_name_after_any_separator():
+    backend = ScriptedBackend([AssistantMessage("ok", [])])
+    Agent(backend, toolbox()).ask(r"任务作者 DESKTOP-1\tester 是谁？")
+    assert backend.calls[0][1]["content"] == r"任务作者 DESKTOP-1\%USER% 是谁？"

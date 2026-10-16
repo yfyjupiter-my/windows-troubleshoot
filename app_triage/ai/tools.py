@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import app_triage.scanners  # noqa: F401 - registers every scanner in SCANNERS
 from app_triage.actions import ACTIONS
 from app_triage.models import Finding
-from app_triage.safety.redact import redact
+from app_triage.safety.redact import Redactor
 from app_triage.scanners.base import SCANNERS, run_scan
 from app_triage.scanners.installed import list_installed
 from app_triage.sysapi.base import SystemAPI
@@ -52,6 +52,7 @@ class ToolBox:
     def __init__(self, sys: SystemAPI, state: TriageState) -> None:
         self.sys = sys
         self.state = state
+        self.redactor = Redactor.for_system(sys)
         self._handlers: dict[str, Callable[[dict], object]] = {
             "run_scanner": self._run_scanner,
             "list_installed_apps": self._list_installed_apps,
@@ -82,7 +83,7 @@ class ToolBox:
             result = {"error": str(e)}
         except Exception as e:  # noqa: BLE001 - a tool failure must go back to the model, not crash
             result = {"error": f"工具执行出错：{type(e).__name__}: {e}"}
-        text = redact(json.dumps(result, ensure_ascii=False), self.sys.username())
+        text = json.dumps(self.redactor.data(result), ensure_ascii=False)
         if len(text) > MAX_RESULT_CHARS:
             text = text[:MAX_RESULT_CHARS] + TRUNCATION_SUFFIX
         return text

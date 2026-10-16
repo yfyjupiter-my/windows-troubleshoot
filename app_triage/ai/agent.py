@@ -5,7 +5,6 @@ import json
 from dataclasses import dataclass
 
 from app_triage.models import Finding
-from app_triage.safety.redact import redact
 
 from .client import AssistantMessage, ChatBackend, describe_error
 from .tools import Proposal, ToolBox
@@ -49,19 +48,16 @@ class Agent:
     def reset(self) -> None:
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    def _redact(self, text: str) -> str:
-        return redact(text, self.toolbox.sys.username())
-
     def ask(self, user_text: str) -> AgentReply:
-        return self._converse(self._redact(user_text))
+        return self._converse(self.toolbox.redactor.text(user_text))
 
     def explain(self, findings: list[Finding]) -> AgentReply:
         if not findings:
             return AgentReply(NOTHING_TO_EXPLAIN, [])
         for f in findings:
             self.toolbox.state.findings[f.id] = f
-        payload = json.dumps([f.to_dict() for f in findings], ensure_ascii=False)
-        return self._converse(EXPLAIN_PREFIX + self._redact(payload))
+        payload = self.toolbox.redactor.data([f.to_dict() for f in findings])
+        return self._converse(EXPLAIN_PREFIX + json.dumps(payload, ensure_ascii=False))
 
     def _converse(self, user_content: str) -> AgentReply:
         proposals = self.toolbox.state.proposals

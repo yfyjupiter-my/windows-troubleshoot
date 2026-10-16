@@ -189,3 +189,20 @@ def test_run_scanner_partial_failure_returns_findings_and_the_error():
     assert [f["evidence"]["name"] for f in out["findings"]] == ["WPSCloud"]
     assert "计划任务" in out["error"]
     assert len(state.findings) == 1
+
+
+def test_run_scanner_redacts_task_author_and_profile_name():
+    from app_triage.sysapi.base import TaskInfo
+
+    class RenamedAccount(FakeSystem):
+        def username(self):
+            return "tom"
+
+    s = RenamedAccount()
+    s.add_task(TaskInfo(r"\2345Update", r"C:\Users\tester\AppData\2345\up.exe", True, r"DESKTOP-1\tom"))
+    s.add_task(TaskInfo(r"\Other", r"C:\Users\tester2\x.exe", True, r"DESKTOP-1\tester2"))
+    raw = ToolBox(s, TriageState({}, [])).call("run_scanner", json.dumps({"name": "autoruns"}))
+    items = {i["evidence"]["name"]: i["evidence"] for i in json.loads(raw)}
+    assert items[r"\2345Update"]["author"] == r"DESKTOP-1\%USER%"
+    assert items[r"\2345Update"]["exe"] == r"C:\Users\%USER%\AppData\2345\up.exe"
+    assert items[r"\Other"]["author"] == r"DESKTOP-1\tester2"  # a longer name is someone else
