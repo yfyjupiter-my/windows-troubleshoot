@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      # Includes tests/test_windows_smoke.py, which is skipped everywhere except Windows.
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Build AppTriage.exe
+        shell: cmd
+        run: call build.bat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AppTriage
+          path: dist/AppTriage.exe
+          if-no-files-found: error
