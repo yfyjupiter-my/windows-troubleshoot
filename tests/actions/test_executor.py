@@ -129,7 +129,7 @@ def test_unknown_kind_and_exceptions_fail_without_stopping(tmp_path):
     r = execute(specs, s, Journal(tmp_path), YES)
     assert [e.status for e in r.entries] == ["failed", "failed", "failed", "applied"]
     assert r.entries[0].message == "未知的修复类型：format_disk"
-    assert r.entries[1].message.startswith("拒绝访问")
+    assert r.entries[1].message == f"权限不足：{RUN}"
     assert r.entries[2].message == "没有找到卸载程序"
     assert s.launched == []
 
@@ -144,7 +144,68 @@ def test_undo_uninstaller_is_irreversible_and_undo_continues_past_errors(tmp_pat
     s.deny(RUN)  # undo of the registry change will raise AccessDenied
     undone = undo_session(r.session_id, s, Journal(tmp_path))
     assert [(e.index, e.status) for e in undone] == [(2, "undo_failed"), (1, "undo_failed"), (0, "undone")]
-    assert undone[0].message.startswith("拒绝访问")
+    assert undone[0].message == f"权限不足：{RUN}"
     assert undone[1].message == "卸载操作无法撤销"
     assert s.list_tasks()[0].enabled is True
     assert s.launched == ["u.exe /S"]
+
+
+def test_protection_check_error_fails_closed_and_continues(tmp_path):
+    s = base_system()
+
+    def broken(path):
+        raise OSError("WinVerifyTrust failed")
+    s.get_signature = broken
+    specs = [ActionSpec("quarantine_path", EXE), ActionSpec("disable_task", r"\WpsUpdate")]
+    r = execute(specs, s, Journal(tmp_path), YES)
+    assert [e.status for e in r.entries] == ["failed", "applied"]
+    assert "已拒绝" in r.entries[0].message
+    assert s.path_exists(EXE) and not s.list_tasks()[0].enabled
+    assert [e.status for e in Journal(tmp_path).load(r.session_id).entries] == ["failed", "applied"]
+
+
+def test_confirm_raising_counts_as_cancel(tmp_path):
+    s = base_system()
+
+    def confirm(spec):
+        raise RuntimeError("dialog closed")
+    specs = [ActionSpec("set_service_start", "wpscloudsvr", (("start", "disabled"),), high_risk=True),
+             ActionSpec("disable_task", r"\WpsUpdate")]
+    r = execute(specs, s, Journal(tmp_path), confirm)
+    assert [(e.status, e.message) for e in r.entries] == [("failed", "用户取消"), ("applied", "")]
+    assert s.list_services()[0].start_type == "auto"
+
+
+def test_device_prefixed_system_paths_protected():
+    s = FakeSystem()
+    for p in (r"\\?\C:\Windows\System32\x.dll", r"\\.\C:\Windows\x.dll", r"\??\C:\Windows\x.dll",
+              "//?/C:/Windows/x.dll", r"C:\Windows\System32\..\x.dll"):
+        assert is_protected(ActionSpec("quarantine_path", p), s), p
+    assert not is_protected(ActionSpec("quarantine_path", r"\\?\C:\Windows2\x.dll"), s)
+
+
+def test_quarantine_moves_exactly_the_checked_path(tmp_path):
+    s = base_system()
+    checked, moved = [], []
+    sig, mv = s.get_signature, s.move
+    s.get_signature = lambda p: checked.append(p) or sig(p)
+    s.move = lambda src, dst: moved.append(src) or mv(src, dst)
+    r = execute([ActionSpec("quarantine_path", r"\\?\%AppData%\wps\.\wps.exe")], s, Journal(tmp_path), YES)
+    [e] = r.entries
+    assert e.status == "applied" and not s.path_exists(EXE)
+    assert checked == moved == [EXE] and e.backup["original"] == EXE
+
+
+def test_error_messages_are_chinese(tmp_path):
+    s = base_system(); s.deny(RUN)
+
+    def broken(name, start):
+        raise OSError("disk on fire")
+    s.set_service_start = broken
+    missing = r"C:\Users\tester\AppData\Roaming\missing"
+    specs = [ActionSpec("delete_reg_value", RUN, (("name", "WPS"),)),
+             ActionSpec("quarantine_path", missing),
+             ActionSpec("set_service_start", "wpscloudsvr", (("start", "disabled"),))]
+    r = execute(specs, s, Journal(tmp_path), YES)
+    assert [e.message for e in r.entries] == [f"权限不足：{RUN}", f"未找到：{missing}",
+                                              "操作失败：disk on fire"]

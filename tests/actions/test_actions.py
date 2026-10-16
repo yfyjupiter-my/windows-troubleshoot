@@ -223,3 +223,24 @@ def test_run_uninstaller_without_command_fails(session):
     with pytest.raises(ActionError, match="没有找到卸载程序"):
         apply(ActionSpec("run_uninstaller", r"HKLM\...\Uninstall\WPS", (("command", " "),)), s, session)
     assert s.launched == []
+
+
+def test_resolve_fs_path_strips_device_prefixes_and_expands():
+    from app_triage.actions.base import resolve_fs_path
+    s = FakeSystem()
+    assert resolve_fs_path(s, r"\\?\UNC\srv\share\x.exe") == r"\\srv\share\x.exe"
+    assert resolve_fs_path(s, r"\??\%AppData%\a\..\b.exe") == r"C:\Users\tester\AppData\Roaming\b.exe"
+    once = resolve_fs_path(s, r"\\.\C:\Temp\.\x")
+    assert once == r"C:\Temp\x" and resolve_fs_path(s, once) == once
+
+
+def test_error_message_texts():
+    from app_triage.actions.base import error_message
+    from app_triage.sysapi.base import AccessDenied
+    assert error_message(KeyError("v"), "T") == "未找到：T"
+    assert error_message(FileNotFoundError(2, "x"), "T") == "未找到：T"
+    assert error_message(AccessDenied("k"), "T") == "权限不足：T"
+    assert error_message(PermissionError(13, "x"), "T") == "权限不足：T"
+    assert error_message(ActionError("没有找到卸载程序"), "T") == "没有找到卸载程序"
+    assert error_message(OSError("坏了"), "T") == "操作失败：坏了"
+    assert error_message(RuntimeError(), "T") == "操作失败：RuntimeError"

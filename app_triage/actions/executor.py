@@ -6,11 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from app_triage.models import ActionSpec
-from app_triage.safety.journal import Journal, JournalEntry
+from app_triage.safety.journal import FixSession, Journal, JournalEntry
 from app_triage.scanners.cmdline import is_microsoft
 from app_triage.sysapi.base import SystemAPI
 
-from .base import IRREVERSIBLE_MESSAGE, Action, error_message
+from .base import IRREVERSIBLE_MESSAGE, Action, error_message, resolve_fs_path
 from .registry_actions import DeleteRegKey, DeleteRegValue, ResetFileAssoc, SetRegValue
 from .system_actions import (
     DisableTask, FixShortcutArgs, QuarantinePath, RunUninstaller, SetServiceStart,
@@ -32,16 +32,24 @@ class ExecResult:
     needs_default_apps: bool
 
 
-def _norm(path: str) -> str:
-    return ntpath.normcase(ntpath.normpath(path)).rstrip("\\")
+def _fold(path: str) -> str:
+    return ntpath.normcase(path).rstrip("\\")
+
+
+def _resolved(spec: ActionSpec, sys: SystemAPI) -> ActionSpec:
+    """Quarantine targets are resolved once, so the protection check and the move see one path."""
+    if spec.kind != "quarantine_path":
+        return spec
+    return replace(spec, target=resolve_fs_path(sys, spec.target))
 
 
 def is_protected(spec: ActionSpec, sys: SystemAPI) -> bool:
     """Quarantining anything under SystemRoot, or a Microsoft-signed file, is never allowed."""
     if spec.kind != "quarantine_path":
         return False
-    path = sys.expand_env(spec.target)
-    target, root = _norm(path), _norm(sys.known_folders().get("SystemRoot", r"C:\Windows"))
+    path = resolve_fs_path(sys, spec.target)
+    root = resolve_fs_path(sys, sys.known_folders().get("SystemRoot", r"C:\Windows"))
+    target, root = _fold(path), _fold(root)
     if target == root or target.startswith(root + "\\"):
         return True
     return is_microsoft(sys.get_signature(path))
@@ -59,21 +67,7 @@ def execute(specs: list[ActionSpec], sys: SystemAPI, journal: Journal,
     session = journal.begin(label)
     restore_point = _try_restore_point(sys) if specs else False
     for index, spec in enumerate(specs):
-        entry = JournalEntry(index, spec.kind, spec.target, dict(spec.params), "failed", {})
-        action = ACTIONS.get(spec.kind)
-        if action is None:
-            entry.message = f"未知的修复类型：{spec.kind}"
-        elif is_protected(spec, sys):
-            entry.message = "受保护的系统文件，已拒绝"
-        elif spec.high_risk and not confirm_high_risk(spec):
-            entry.message = "用户取消"
-        else:
-            try:
-                entry.backup = action.apply(spec, sys, session, index)
-                entry.status = "applied"
-            except Exception as exc:
-                entry.message = error_message(exc)
-        session.record(entry)
+        session.record(_run_one(index, spec, sys, session, confirm_high_risk))
     return ExecResult(
         session_id=session.id,
         entries=list(session.entries),
@@ -81,6 +75,39 @@ def execute(specs: list[ActionSpec], sys: SystemAPI, journal: Journal,
         needs_default_apps=any(e.status == "applied" and e.backup.get("needs_default_apps") == "1"
                                for e in session.entries),
     )
+
+
+def _run_one(index: int, spec: ActionSpec, sys: SystemAPI, session: FixSession,
+             confirm_high_risk: Callable[[ActionSpec], bool]) -> JournalEntry:
+    """Decide and apply one spec; never raises, always returns its journal entry."""
+    entry = JournalEntry(index, spec.kind, spec.target, dict(spec.params), "failed", {})
+    action = ACTIONS.get(spec.kind)
+    if action is None:
+        entry.message = f"未知的修复类型：{spec.kind}"
+        return entry
+    try:
+        spec = _resolved(spec, sys)
+        protected = is_protected(spec, sys)
+    except Exception as exc:  # fail closed: an unverifiable target is never touched
+        entry.message = f"无法确认是否为受保护的系统文件，已拒绝（{error_message(exc, spec.target)}）"
+        return entry
+    if protected:
+        entry.message = "受保护的系统文件，已拒绝"
+        return entry
+    if spec.high_risk:
+        try:
+            confirmed = confirm_high_risk(spec)
+        except Exception:
+            confirmed = False
+        if not confirmed:
+            entry.message = "用户取消"
+            return entry
+    try:
+        entry.backup = action.apply(spec, sys, session, index)
+        entry.status = "applied"
+    except Exception as exc:
+        entry.message = error_message(exc, spec.target)
+    return entry
 
 
 def undo_session(session_id: str, sys: SystemAPI, journal: Journal) -> list[JournalEntry]:
@@ -98,7 +125,7 @@ def undo_session(session_id: str, sys: SystemAPI, journal: Journal) -> list[Jour
                 action.undo(entry, sys, session)
                 done = replace(entry, status="undone", message="")
             except Exception as exc:
-                done = replace(entry, status="undo_failed", message=error_message(exc))
+                done = replace(entry, status="undo_failed", message=error_message(exc, entry.target))
         session.update(done)
         results.append(done)
     return results

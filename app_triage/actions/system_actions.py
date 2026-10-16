@@ -7,7 +7,7 @@ from app_triage.models import ActionSpec
 from app_triage.safety.journal import FixSession, JournalEntry
 from app_triage.sysapi.base import SystemAPI
 
-from .base import ActionError
+from .base import ActionError, resolve_fs_path
 
 _START_NAMES = {"auto": "自动", "manual": "手动", "disabled": "禁用", "boot": "引导", "system": "系统"}
 
@@ -62,10 +62,11 @@ class QuarantinePath:
         return f"移到隔离区（可恢复）：{spec.target}"
 
     def apply(self, spec, sys, session, index):
-        name = ntpath.basename(spec.target.rstrip("\\/")) or "item"
+        src = resolve_fs_path(sys, spec.target)  # idempotent: same string the executor checked
+        name = ntpath.basename(src.rstrip("\\")) or "item"
         dest = str(session.quarantine_dir() / f"{index}_{name}")
-        sys.move(spec.target, dest)
-        return {"original": spec.target, "moved_to": dest}
+        sys.move(src, dest)
+        return {"original": src, "moved_to": dest}
 
     def undo(self, entry, sys, session):
         if sys.path_exists(entry.backup["original"]):
