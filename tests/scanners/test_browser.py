@@ -42,6 +42,9 @@ def test_clean_shortcut_ignored():
     s.add_shortcut(DESKTOP + r"\Edge.lnk", ShortcutInfo(EDGE, "--profile-directory=Default"))
     s.add_shortcut(DESKTOP + r"\Notepad.lnk", ShortcutInfo(r"C:\Windows\notepad.exe", "https://x.com"))
     s.add_shortcut(DESKTOP + r"\App.lnk", ShortcutInfo(EDGE, "--app=https://mail.example.com"))
+    # whitespace-only differences (double space, tab, quoted spaces) are not a URL to remove
+    s.add_shortcut(DESKTOP + r"\Spaced.lnk", ShortcutInfo(EDGE, "--profile-directory=Default  --new-window"))
+    s.add_shortcut(DESKTOP + r"\Tabbed.lnk", ShortcutInfo(EDGE, '--user-data-dir="C:\\a  b"\t--x '))
     assert scan_browser(s) == []
 
 

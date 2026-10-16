@@ -20,11 +20,13 @@ PREFERENCES = (  # (browser, path under LocalAppData)
 HIJACK_URL = re.compile(r"hao123|2345|360", re.IGNORECASE)
 
 
+def _is_url_token(token: str) -> bool:
+    return token.lstrip("\"'").lower().startswith(("http://", "https://"))
+
+
 def _strip_urls(args: str) -> str:
     """Drop whitespace-separated tokens that are http(s) URLs (optionally quoted)."""
-    kept = [t for t in args.split()
-            if not t.lstrip("\"'").lower().startswith(("http://", "https://"))]
-    return " ".join(kept)
+    return " ".join(t for t in args.split() if not _is_url_token(t))
 
 
 def _shortcut_files(sys: SystemAPI, root: str) -> list[str]:
@@ -62,9 +64,9 @@ def _scan_shortcuts(sys: SystemAPI) -> list[Finding]:
                 continue
             if ntpath.basename(link.target.strip().strip('"')).lower() not in BROWSER_EXES:
                 continue
-            cleaned = _strip_urls(link.arguments)
-            if cleaned == link.arguments.strip():
+            if not any(_is_url_token(t) for t in link.arguments.split()):
                 continue  # no bare URL argument to remove
+            cleaned = _strip_urls(link.arguments)
             findings.append(Finding(
                 id=make_finding_id("browser", lnk),
                 category="browser",
