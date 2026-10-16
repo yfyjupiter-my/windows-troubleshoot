@@ -215,3 +215,22 @@ def test_short_app_names_own_their_program_files_folder():
     s.add_file(r"C:\Program Files\Git\git-bash.exe", size=1)
     s.add_file(r"C:\Program Files\Zap\zap.exe", size=1)  # unrelated short name: still reported
     assert [f.evidence["path"] for f in scan_leftovers(s)] == [r"C:\Program Files\Zap"]
+
+
+def test_same_name_in_different_roots_gets_distinct_titles():
+    s = FakeSystem()
+    s.add_file(ROAMING + r"\Kingsoft\a.ini", size=1)
+    s.add_file(LOCAL + r"\Kingsoft\b.ini", size=1)
+    pf86 = r"C:\Program Files (x86)\2345Soft"
+    s.add_key(HKLM_U + r"\2345Pic", {"DisplayName": "2345看图王", "Publisher": "2345",
+                                     "InstallLocation": pf86 + r"\2345Pic"})
+    s.add_file(pf86 + r"\2345Pic\pic.exe", size=1)
+    s.add_file(pf86 + r"\OldUpdater\up.exe", size=1)
+    s.add_file(r"C:\Program Files\OldTool\a.dll", size=1)
+    titles = {f.evidence["path"]: f.title for f in scan_leftovers(s)}
+    assert titles == {
+        ROAMING + r"\Kingsoft": r"残留文件夹：Kingsoft（AppData\Roaming）",
+        LOCAL + r"\Kingsoft": r"残留文件夹：Kingsoft（AppData\Local）",
+        pf86 + r"\OldUpdater": r"残留文件夹：OldUpdater（Program Files (x86)\2345Soft）",
+        r"C:\Program Files\OldTool": r"残留文件夹：OldTool（Program Files）",
+    }

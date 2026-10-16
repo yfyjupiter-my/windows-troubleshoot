@@ -12,6 +12,10 @@ from .installed import InstalledApp, list_installed
 
 FOLDER_ROOTS = ("ProgramFiles", "ProgramFilesX86", "ProgramData", "AppData", "LocalAppData")
 PROGRAM_FILES_ROOTS = ("ProgramFiles", "ProgramFilesX86")
+# shown in titles, so the same folder name under two roots stays distinguishable
+ROOT_LABELS = {"ProgramFiles": "Program Files", "ProgramFilesX86": "Program Files (x86)",
+               "ProgramData": "ProgramData", "AppData": "AppData\\Roaming",
+               "LocalAppData": "AppData\\Local"}
 REGISTRY_ROOTS = (r"HKCU\Software", r"HKLM\SOFTWARE", r"HKLM\SOFTWARE\WOW6432Node")
 
 SKIP_DIRS = frozenset(n.lower() for n in (
@@ -147,7 +151,7 @@ def scan_leftovers(sys: SystemAPI) -> list[Finding]:
     findings: list[Finding] = []
     seen: set[str] = set()
 
-    def report(entry: DirEntry, under_program_files: bool) -> None:
+    def report(entry: DirEntry, under_program_files: bool, where: str) -> None:
         if owners.folder_owned(entry.path, entry.name, under_program_files) or _norm(entry.path) in seen:
             return
         rule = match_vendor(entry.path)
@@ -161,7 +165,7 @@ def scan_leftovers(sys: SystemAPI) -> list[Finding]:
         findings.append(Finding(
             id=make_finding_id("leftovers", entry.path),
             category="leftovers",
-            title=f"残留文件夹：{entry.name}",
+            title=f"残留文件夹：{entry.name}（{where}）",
             evidence={"path": entry.path, "size": str(_folder_size(sys, entry.path, problems))},
             risk=risk,
             actions=[ActionSpec("quarantine_path", entry.path)],
@@ -169,16 +173,16 @@ def scan_leftovers(sys: SystemAPI) -> list[Finding]:
         ))
 
     for key, root in roots:
-        in_pf = key in PROGRAM_FILES_ROOTS
+        in_pf, label = key in PROGRAM_FILES_ROOTS, ROOT_LABELS[key]
         for top in _subdirs(sys, root, problems):
             with problems.guard(f"文件夹 {top.path}"):
                 if not owners.folder_owned(top.path, top.name, in_pf):
-                    report(top, in_pf)
+                    report(top, in_pf, label)
                 elif match_vendor(top.path) is not None:
                     # an owned vendor folder (e.g. Kingsoft) may still hold orphaned children
                     for child in _subdirs(sys, top.path, problems):
                         with problems.guard(f"文件夹 {child.path}"):
-                            report(child, in_pf)
+                            report(child, in_pf, f"{label}\\{top.name}")
 
     for reg_root in REGISTRY_ROOTS:
         subkeys: list[str] = []
