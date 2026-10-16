@@ -210,6 +210,22 @@ def test_list_dir_reparse_points_are_not_directories(monkeypatch):
     assert not got["a.exe"].is_dir and got["a.exe"].size == 42
 
 
+def test_list_dir_other_os_errors_become_access_denied(monkeypatch):
+    def unreadable(path):
+        raise _winerror(1920)  # ERROR_CANT_ACCESS_FILE (e.g. a broken cloud placeholder)
+    monkeypatch.setattr(windows.os, "scandir", unreadable)
+    with pytest.raises(AccessDenied):
+        WindowsSystem().list_dir(r"C:\Users\t\OneDrive")
+
+    class _Failing(_Scan):
+        def __iter__(self):
+            yield _Entry("a.exe", False, 0x20)
+            raise OSError(5, "I/O error mid-listing")
+    monkeypatch.setattr(windows.os, "scandir", lambda path: _Failing())
+    with pytest.raises(AccessDenied):
+        WindowsSystem().list_dir(r"C:\Users\t")
+
+
 # ---- move: rename only; cross-volume via a staged rename ------------------------------------
 
 @pytest.fixture

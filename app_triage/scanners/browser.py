@@ -7,8 +7,8 @@ import re
 
 from ..models import ActionSpec, Finding, Risk, make_finding_id
 from ..rules import match_vendor
-from ..sysapi.base import AccessDenied, SystemAPI
-from .base import register
+from ..sysapi.base import DirEntry, ShortcutInfo, SystemAPI
+from .base import Problems, register
 
 SHORTCUT_FOLDERS = ("Desktop", "StartMenu", "CommonStartMenu")
 TASKBAR_PINS = r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"  # under AppData
@@ -37,14 +37,14 @@ def _strip_urls(args: str) -> str:
     return _ARG.sub(lambda m: "" if _is_url_token(m.group(2)) else m.group(0), args).strip()
 
 
-def _shortcut_files(sys: SystemAPI, root: str) -> list[str]:
+def _shortcut_files(sys: SystemAPI, root: str, problems: Problems) -> list[str]:
     out: list[str] = []
     stack = [root]
     while stack:
-        try:
-            entries = sys.list_dir(stack.pop())
-        except (KeyError, AccessDenied):
-            continue
+        folder = stack.pop()
+        entries: list[DirEntry] = []
+        with problems.guard(f"文件夹 {folder}"):
+            entries = sys.list_dir(folder)
         for e in entries:
             if e.is_dir:
                 stack.append(e.path)
@@ -53,7 +53,7 @@ def _shortcut_files(sys: SystemAPI, root: str) -> list[str]:
     return out
 
 
-def _scan_shortcuts(sys: SystemAPI) -> list[Finding]:
+def _scan_shortcuts(sys: SystemAPI, problems: Problems) -> list[Finding]:
     folders = sys.known_folders()
     roots = [folders[k] for k in SHORTCUT_FOLDERS if folders.get(k)]
     if folders.get("AppData"):
@@ -61,30 +61,33 @@ def _scan_shortcuts(sys: SystemAPI) -> list[Finding]:
     findings: list[Finding] = []
     seen: set[str] = set()
     for root in roots:
-        for lnk in _shortcut_files(sys, root):
+        for lnk in _shortcut_files(sys, root, problems):
             norm = ntpath.normcase(ntpath.normpath(lnk))
             if norm in seen:
                 continue
             seen.add(norm)
-            try:
-                link = sys.read_shortcut(lnk)
-            except (KeyError, AccessDenied):
-                continue
-            if ntpath.basename(link.target.strip().strip('"')).lower() not in BROWSER_EXES:
-                continue
-            if not _has_url(link.arguments):
-                continue  # no bare URL argument to remove
-            cleaned = _strip_urls(link.arguments)
-            findings.append(Finding(
-                id=make_finding_id("browser", lnk),
-                category="browser",
-                title=f"浏览器快捷方式被附加网址：{ntpath.basename(lnk)}",
-                evidence={"path": lnk, "target": link.target, "arguments": link.arguments},
-                risk=Risk.MEDIUM,
-                actions=[ActionSpec("fix_shortcut_args", lnk, (("args", cleaned),))],
-                vendor=(rule.name if (rule := match_vendor(link.arguments)) else None),
-            ))
+            with problems.guard(f"快捷方式 {lnk}"):
+                f = _shortcut_finding(lnk, sys.read_shortcut(lnk))
+                if f is not None:
+                    findings.append(f)
     return findings
+
+
+def _shortcut_finding(lnk: str, link: ShortcutInfo) -> Finding | None:
+    if ntpath.basename(link.target.strip().strip('"')).lower() not in BROWSER_EXES:
+        return None
+    if not _has_url(link.arguments):
+        return None  # no bare URL argument to remove
+    cleaned = _strip_urls(link.arguments)
+    return Finding(
+        id=make_finding_id("browser", lnk),
+        category="browser",
+        title=f"浏览器快捷方式被附加网址：{ntpath.basename(lnk)}",
+        evidence={"path": lnk, "target": link.target, "arguments": link.arguments},
+        risk=Risk.MEDIUM,
+        actions=[ActionSpec("fix_shortcut_args", lnk, (("args", cleaned),))],
+        vendor=(rule.name if (rule := match_vendor(link.arguments)) else None),
+    )
 
 
 def _preference_urls(data: object) -> list[tuple[str, str]]:
@@ -102,17 +105,22 @@ def _preference_urls(data: object) -> list[tuple[str, str]]:
     return out
 
 
-def _scan_preferences(sys: SystemAPI) -> list[Finding]:
+def _scan_preferences(sys: SystemAPI, problems: Problems) -> list[Finding]:
     local = sys.known_folders().get("LocalAppData")
     if not local:
         return []
     findings: list[Finding] = []
     for browser, rel in PREFERENCES:
         path = ntpath.join(local, rel)
+        text: str | None = None
+        with problems.guard(f"{browser} 设置文件 {path}"):  # missing/denied stay silent
+            text = sys.read_text(path)
+        if text is None:
+            continue
         try:
-            data = json.loads(sys.read_text(path))
-        except (KeyError, AccessDenied, ValueError):
-            continue  # missing, unreadable or malformed
+            data = json.loads(text)
+        except ValueError:
+            continue  # malformed: nothing to report
         seen: set[str] = set()
         for setting, url in _preference_urls(data):
             rule = match_vendor(url)
@@ -133,4 +141,9 @@ def _scan_preferences(sys: SystemAPI) -> list[Finding]:
 
 @register("browser", "浏览器劫持")
 def scan_browser(sys: SystemAPI) -> list[Finding]:
-    return _scan_shortcuts(sys) + _scan_preferences(sys)
+    problems = Problems()
+    findings: list[Finding] = []
+    for part in (_scan_shortcuts, _scan_preferences):
+        with problems.guard("浏览器劫持"):
+            findings.extend(part(sys, problems))
+    return problems.result(findings)

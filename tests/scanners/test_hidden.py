@@ -75,3 +75,26 @@ def test_access_denied_subdir_skipped():
     s.deny(ROAMING + r"\Locked")
     paths = {f.evidence["path"] for f in scan_hidden(s)}
     assert paths == {ROAMING + r"\Open\bad.exe"}
+
+
+def test_unexpected_listing_error_skips_that_folder_only():
+    import pytest
+    from app_triage.scanners.base import PartialScanError, run_scan
+    s = FakeSystem()
+    good, bad = ROAMING + r"\Foo\svc.exe", LOCAL + r"\Broken\x.exe"
+    s.add_file(good, hidden=True)
+    s.add_file(bad, hidden=True)
+    real = s.list_dir
+
+    def flaky(path):
+        if path.lower().endswith("broken"):
+            raise OSError(1920, "The file cannot be accessed by the system")
+        return real(path)
+
+    s.list_dir = flaky
+    with pytest.raises(PartialScanError) as info:
+        scan_hidden(s)
+    assert [f.evidence["path"] for f in info.value.findings] == [good]
+    r = run_scan(s, ["hidden"])
+    assert [f.evidence["path"] for f in r.findings] == [good]
+    assert "Broken" in r.errors["hidden"]

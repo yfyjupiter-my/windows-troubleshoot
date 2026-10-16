@@ -32,3 +32,16 @@ def test_run_scan_all_in_registration_order(monkeypatch):
     monkeypatch.setattr(base, "SCANNERS", {"a": ("甲", lambda s: []), "b": ("乙", lambda s: [])})
     run_scan(FakeSystem(), progress=seen.append)
     assert seen == ["正在扫描：甲", "正在扫描：乙"]
+
+
+def test_partial_scan_keeps_findings_and_lists_problems(monkeypatch):
+    from app_triage.scanners.base import PartialScanError
+
+    def partial(sys):
+        raise PartialScanError([Finding("a", "x", "t", {}, Risk.LOW, [])],
+                               [f"来源{i}（OSError: x）" for i in range(5)])
+    monkeypatch.setattr(base, "SCANNERS", {"p": ("部分", partial)})
+    r = run_scan(FakeSystem())
+    assert [f.id for f in r.findings] == ["a"]
+    assert r.errors["p"].startswith("部分内容未能读取")
+    assert "来源2" in r.errors["p"] and "来源3" not in r.errors["p"] and "等 5 处" in r.errors["p"]

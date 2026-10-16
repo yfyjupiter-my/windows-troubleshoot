@@ -175,3 +175,17 @@ def test_toolbox_never_executes_actions():
     assert call(tb, "propose_fix", {"finding_id": f.id, "action_index": 0, "reason": "r"}) == {"ok": True}
     assert s.__dict__ == before
     assert s.launched == [] and s.opened_uris == [] and s.restore_points == []
+
+
+def test_run_scanner_partial_failure_returns_findings_and_the_error():
+    s = wps_system()
+
+    def broken():
+        raise OSError("ScheduledTasks: exit code 1")
+
+    s.list_tasks = broken
+    state = TriageState({}, [])
+    out = call(ToolBox(s, state), "run_scanner", {"name": "autoruns"})
+    assert [f["evidence"]["name"] for f in out["findings"]] == ["WPSCloud"]
+    assert "计划任务" in out["error"]
+    assert len(state.findings) == 1

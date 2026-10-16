@@ -105,12 +105,15 @@ class ToolBox:
         if key not in SCANNERS:
             raise ToolError(f"未知的扫描项：{key}，可选：{', '.join(SCANNERS)}")
         result = run_scan(self.sys, [key])
-        if key in result.errors:
-            raise ToolError(result.errors[key])
+        error = result.errors.get(key)
+        if error and not result.findings:
+            raise ToolError(error)
         for f in result.findings:
             self.state.findings[f.id] = f
-        return [{"id": f.id, "title": f.title, "risk": f.risk.value, "vendor": f.vendor,
-                 "evidence": f.evidence} for f in result.findings]
+        items = [{"id": f.id, "title": f.title, "risk": f.risk.value, "vendor": f.vendor,
+                  "evidence": f.evidence} for f in result.findings]
+        # a partly failed scan still returns what it found, plus what could not be read
+        return {"findings": items, "error": error} if error else items
 
     def _list_installed_apps(self, args: dict) -> object:
         keyword = _str_arg(args, "keyword", "").strip().lower()

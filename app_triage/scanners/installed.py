@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 from ..models import ActionSpec, Finding, Risk, make_finding_id
 from ..rules import match_vendor
-from ..sysapi.base import AccessDenied, SystemAPI
-from .base import register
+from ..sysapi.base import SystemAPI
+from .base import Problems, register
 
 UNINSTALL_ROOTS = (
     r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -37,37 +37,37 @@ def _is_system_component(value: object) -> bool:
     return isinstance(value, str) and value.strip() == "1"
 
 
-def list_installed(sys: SystemAPI) -> list[InstalledApp]:
+def list_installed(sys: SystemAPI, problems: Problems | None = None) -> list[InstalledApp]:
+    """Every readable Uninstall entry; unreadable ones are skipped (and noted in problems)."""
+    problems = problems if problems is not None else Problems()
     apps: list[InstalledApp] = []
     for root in UNINSTALL_ROOTS:
-        try:
+        subkeys: list[str] = []
+        with problems.guard(f"卸载信息 {root}"):
             subkeys = sys.reg_subkeys(root)
-        except (KeyError, AccessDenied):
-            continue
         for sub in subkeys:
             key_path = f"{root}\\{sub}"
-            try:
+            with problems.guard(f"卸载信息 {key_path}"):
                 vals = sys.reg_values(key_path)
-            except (KeyError, AccessDenied):
-                continue
-            name = _text(vals.get("DisplayName"))
-            if not name or _is_system_component(vals.get("SystemComponent")):
-                continue
-            apps.append(InstalledApp(
-                name=name,
-                publisher=_text(vals.get("Publisher")),
-                version=_text(vals.get("DisplayVersion")),
-                install_location=_text(vals.get("InstallLocation")),
-                uninstall_string=_text(vals.get("UninstallString")),
-                key_path=key_path,
-            ))
+                name = _text(vals.get("DisplayName"))
+                if not name or _is_system_component(vals.get("SystemComponent")):
+                    continue
+                apps.append(InstalledApp(
+                    name=name,
+                    publisher=_text(vals.get("Publisher")),
+                    version=_text(vals.get("DisplayVersion")),
+                    install_location=_text(vals.get("InstallLocation")),
+                    uninstall_string=_text(vals.get("UninstallString")),
+                    key_path=key_path,
+                ))
     return apps
 
 
 @register("installed", "已安装程序")
 def scan_installed(sys: SystemAPI) -> list[Finding]:
+    problems = Problems()
     findings: list[Finding] = []
-    for app in list_installed(sys):
+    for app in list_installed(sys, problems):
         rule = match_vendor(app.name, app.publisher, app.install_location)
         if rule is None:
             continue
@@ -85,4 +85,4 @@ def scan_installed(sys: SystemAPI) -> list[Finding]:
                                 (("command", app.uninstall_string),))],
             vendor=rule.name,
         ))
-    return findings
+    return problems.result(findings)

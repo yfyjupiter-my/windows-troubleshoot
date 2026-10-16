@@ -5,8 +5,8 @@ import ntpath
 
 from ..models import ActionSpec, Finding, Risk, make_finding_id
 from ..rules import match_vendor
-from ..sysapi.base import AccessDenied, DirEntry, SystemAPI
-from .base import register
+from ..sysapi.base import DirEntry, SystemAPI
+from .base import Problems, register
 from .installed import InstalledApp, list_installed
 
 FOLDER_ROOTS = ("ProgramFiles", "ProgramFilesX86", "ProgramData", "AppData", "LocalAppData")
@@ -76,14 +76,14 @@ class _Owners:
         return any(toks & app for app in self._app_tokens)
 
 
-def _folder_size(sys: SystemAPI, path: str) -> int:
+def _folder_size(sys: SystemAPI, path: str, problems: Problems) -> int:
     total = 0
     stack = [path]
     while stack:
-        try:
-            entries = sys.list_dir(stack.pop())
-        except (AccessDenied, KeyError):
-            continue  # count what is readable
+        folder = stack.pop()
+        entries: list[DirEntry] = []
+        with problems.guard(f"文件夹 {folder}"):  # count what is readable
+            entries = sys.list_dir(folder)
         for e in entries:
             if e.is_dir:
                 stack.append(e.path)
@@ -92,18 +92,19 @@ def _folder_size(sys: SystemAPI, path: str) -> int:
     return total
 
 
-def _subdirs(sys: SystemAPI, path: str) -> list[DirEntry]:
-    try:
-        return [e for e in sys.list_dir(path) if e.is_dir and not _skipped(e.name)]
-    except (AccessDenied, KeyError):
-        return []
+def _subdirs(sys: SystemAPI, path: str, problems: Problems) -> list[DirEntry]:
+    entries: list[DirEntry] = []
+    with problems.guard(f"文件夹 {path}"):
+        entries = sys.list_dir(path)
+    return [e for e in entries if e.is_dir and not _skipped(e.name)]
 
 
 @register("leftovers", "卸载残留")
 def scan_leftovers(sys: SystemAPI) -> list[Finding]:
     folders = sys.known_folders()
     roots = [(k, folders[k]) for k in FOLDER_ROOTS if folders.get(k)]
-    owners = _Owners(list_installed(sys), [p for _, p in roots])
+    problems = Problems()
+    owners = _Owners(list_installed(sys, problems), [p for _, p in roots])
     findings: list[Finding] = []
     seen: set[str] = set()
 
@@ -122,7 +123,7 @@ def scan_leftovers(sys: SystemAPI) -> list[Finding]:
             id=make_finding_id("leftovers", entry.path),
             category="leftovers",
             title=f"残留文件夹：{entry.name}",
-            evidence={"path": entry.path, "size": str(_folder_size(sys, entry.path))},
+            evidence={"path": entry.path, "size": str(_folder_size(sys, entry.path, problems))},
             risk=risk,
             actions=[ActionSpec("quarantine_path", entry.path)],
             vendor=rule.name if rule else None,
@@ -130,19 +131,20 @@ def scan_leftovers(sys: SystemAPI) -> list[Finding]:
 
     for key, root in roots:
         in_pf = key in PROGRAM_FILES_ROOTS
-        for top in _subdirs(sys, root):
-            if not owners.folder_owned(top.path, top.name):
-                report(top, in_pf)
-            elif match_vendor(top.path) is not None:
-                # an owned vendor folder (e.g. Kingsoft) may still hold orphaned children
-                for child in _subdirs(sys, top.path):
-                    report(child, in_pf)
+        for top in _subdirs(sys, root, problems):
+            with problems.guard(f"文件夹 {top.path}"):
+                if not owners.folder_owned(top.path, top.name):
+                    report(top, in_pf)
+                elif match_vendor(top.path) is not None:
+                    # an owned vendor folder (e.g. Kingsoft) may still hold orphaned children
+                    for child in _subdirs(sys, top.path, problems):
+                        with problems.guard(f"文件夹 {child.path}"):
+                            report(child, in_pf)
 
     for reg_root in REGISTRY_ROOTS:
-        try:
+        subkeys: list[str] = []
+        with problems.guard(f"注册表 {reg_root}"):
             subkeys = sys.reg_subkeys(reg_root)
-        except (AccessDenied, KeyError):
-            continue
         for sub in subkeys:
             rule = match_vendor(sub)
             if rule is None or owners.name_owned(sub):
@@ -157,4 +159,4 @@ def scan_leftovers(sys: SystemAPI) -> list[Finding]:
                 actions=[ActionSpec("delete_reg_key", key_path)],
                 vendor=rule.name,
             ))
-    return findings
+    return problems.result(findings)

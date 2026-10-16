@@ -334,6 +334,8 @@ class WindowsSystem:
             raise KeyError(path) from None
         except PermissionError:
             raise AccessDenied(path) from None
+        except OSError as e:  # e.g. WinError 1920 / cloud placeholders: unreadable, so walks skip it
+            raise AccessDenied(f"{path}: {e}") from None
         return sorted(entries, key=lambda d: d.name.lower())
 
     def path_exists(self, path: str) -> bool:
