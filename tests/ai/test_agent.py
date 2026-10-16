@@ -246,3 +246,7 @@ def test_connection_ok_and_error_mapping(fake_openai, monkeypatch):
             "bad", response=httpx.Response(401, request=REQ), body=None)
     monkeypatch.setattr(FakeOpenAI, "__init__", failing_init)
     assert check_connection(Config(api_key="sk")) == "API Key 无效"
+
+
+def test_backend_can_be_built_without_api_key():
+    DeepSeekBackend(Config(api_key=""))  # first launch: no key yet must not raise

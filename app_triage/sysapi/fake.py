@@ -1,6 +1,7 @@
 """In-memory SystemAPI with Windows semantics (case-insensitive registry/paths, backslashes)."""
 from __future__ import annotations
 
+import base64
 import json
 import ntpath
 import re
@@ -21,6 +22,19 @@ def _reg_parts(path: str) -> list[str]:
 
 def _reg_key(path: str) -> str:
     return "\\".join(_reg_parts(path)).lower()
+
+
+def _encode_value(value: object) -> object:
+    """JSON form of a registry value; bytes become a tagged base64 object."""
+    if isinstance(value, bytes):
+        return {"__bytes__": base64.b64encode(value).decode("ascii")}
+    return value
+
+
+def _decode_value(value: object) -> object:
+    if isinstance(value, dict) and set(value) == {"__bytes__"}:
+        return base64.b64decode(value["__bytes__"])
+    return value
 
 
 def _within(key: str, root: str) -> bool:
@@ -130,9 +144,12 @@ class FakeSystem:
         keys = self._subtree(path)
         if not keys:
             raise KeyError(path)
-        snapshot = {"root": path, "keys": [[self._reg[k][0], self._reg[k][1]] for k in sorted(keys)]}
+        snapshot = {"root": path, "keys": [
+            [self._reg[k][0], {n: _encode_value(v) for n, v in self._reg[k][1].items()}]
+            for k in sorted(keys)]}
+        text = json.dumps(snapshot)  # serialize first: a failure must not leave a partial file
         with open(dest_file, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f)
+            f.write(text)
 
     def reg_import(self, src_file: str) -> None:
         with open(src_file, encoding="utf-8") as f:
@@ -141,7 +158,7 @@ class FakeSystem:
             self._check(disp)
         for disp, values in snapshot["keys"]:
             self.add_key(disp)
-            self._reg[_reg_key(disp)] = (disp, dict(values))
+            self._reg[_reg_key(disp)] = (disp, {n: _decode_value(v) for n, v in values.items()})
 
     # ---- environment ----------------------------------------------------
     def known_folders(self) -> dict[str, str]:

@@ -173,3 +173,21 @@ def test_move_carries_shortcuts_and_signatures_and_reads_require_existing_file()
     with pytest.raises(KeyError): s.read_shortcut(r"C:\Desk\a.lnk")
     with pytest.raises(KeyError): s.set_shortcut_arguments(r"C:\Desk\a.lnk", "")
     assert s.get_signature(r"C:\Prog\App\run.exe") == SignatureInfo("unknown", "")
+
+
+def test_reg_export_import_roundtrips_bytes_values(tmp_path):
+    s = FakeSystem(); s.add_key(r"HKCU\B\Progids", {"WPS.PIC.jpg": b"", "bin": b"\x00\xff\x10", "s": "t"})
+    f = str(tmp_path / "bytes.json")
+    s.reg_export(r"HKCU\B", f)
+    s.reg_delete_key(r"HKCU\B")
+    s.reg_import(f)
+    vals = s.reg_values(r"HKCU\B\Progids")
+    assert vals == {"WPS.PIC.jpg": b"", "bin": b"\x00\xff\x10", "s": "t"}
+    assert isinstance(vals["WPS.PIC.jpg"], bytes)
+
+
+def test_reg_export_failure_leaves_no_partial_file(tmp_path):
+    s = FakeSystem(); s.add_key(r"HKCU\B", {"bad": object()})
+    f = tmp_path / "partial.json"
+    with pytest.raises(TypeError): s.reg_export(r"HKCU\B", str(f))
+    assert not f.exists()

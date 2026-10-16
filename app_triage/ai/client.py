@@ -11,6 +11,7 @@ from app_triage.config import Config
 
 REQUEST_TIMEOUT = 60
 CONNECTION_TEST_TIMEOUT = 15
+NO_KEY_PLACEHOLDER = "not-set"
 
 
 @dataclass
@@ -44,7 +45,10 @@ def describe_error(exc: BaseException) -> str:
 class DeepSeekBackend:
     def __init__(self, cfg: Config) -> None:
         self._model = cfg.model
-        self._client = OpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=REQUEST_TIMEOUT)
+        # The SDK refuses an empty key at construction; a fresh install has none yet and the
+        # chat page blocks sending until one is set, so a placeholder only keeps startup alive.
+        self._client = OpenAI(api_key=cfg.api_key or NO_KEY_PLACEHOLDER, base_url=cfg.base_url,
+                              timeout=REQUEST_TIMEOUT)
 
     def complete(self, messages: list[dict], tools: list[dict]) -> AssistantMessage:
         resp = self._client.chat.completions.create(model=self._model, messages=messages, tools=tools)
