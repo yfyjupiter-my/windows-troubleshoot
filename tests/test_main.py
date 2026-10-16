@@ -9,6 +9,18 @@ from app_triage import main as main_module  # noqa: E402
 from app_triage.scanners.base import SCANNERS, run_scan  # noqa: E402
 from app_triage.sysapi.demo import demo_system  # noqa: E402
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def fake_home(monkeypatch, tmp_path):
+    """Redirect Path.home() on every OS (POSIX reads HOME, Windows reads USERPROFILE)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+    return tmp_path
+
 
 def test_demo_scan_finds_all_scenario_items():
     result = run_scan(demo_system())
@@ -27,8 +39,7 @@ def test_demo_scan_finds_all_scenario_items():
     assert any(f.category == "browser" and "2345.com" in str(f.evidence) for f in result.findings)
 
 
-def test_main_demo_constructs_window(qapp, monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_main_demo_constructs_window(qapp, monkeypatch, fake_home):
     shown = []
     monkeypatch.setattr(QApplication, "exec", lambda *a: shown.append(
         [w for w in qapp.topLevelWidgets() if w.isVisible()]) or 0)
@@ -40,7 +51,6 @@ def test_main_demo_constructs_window(qapp, monkeypatch, tmp_path):
         w.deleteLater()
 
 
-def test_data_dir_demo_is_under_home(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("APPDATA", str(tmp_path / "Roaming"))
-    assert main_module.data_dir(True) == tmp_path / ".apptriage"
+def test_data_dir_demo_is_under_home(monkeypatch, fake_home):
+    monkeypatch.setenv("APPDATA", str(fake_home / "Roaming"))
+    assert main_module.data_dir(True) == fake_home / ".apptriage"
