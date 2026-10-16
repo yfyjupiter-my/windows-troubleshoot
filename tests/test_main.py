@@ -54,3 +54,25 @@ def test_main_demo_constructs_window(qapp, monkeypatch, fake_home):
 def test_data_dir_demo_is_under_home(monkeypatch, fake_home):
     monkeypatch.setenv("APPDATA", str(fake_home / "Roaming"))
     assert main_module.data_dir(True) == fake_home / ".apptriage"
+
+
+def test_demo_on_windows_still_protects_the_api_key(monkeypatch, fake_home):
+    import json
+    import sys
+    import types
+
+    from app_triage.config import Config, DpapiCrypto, NullCrypto, save_config
+
+    fake = types.ModuleType("win32crypt")
+    fake.CryptProtectData = lambda data, *a: b"dpapi:" + data[::-1]
+    fake.CryptUnprotectData = lambda data, *a: (None, data[len(b"dpapi:"):][::-1])
+    monkeypatch.setitem(sys.modules, "win32crypt", fake)
+    monkeypatch.setattr(main_module.sys, "platform", "win32")
+    _, crypto, path = main_module._build_environment(True)
+    assert isinstance(crypto, DpapiCrypto)
+    save_config(Config(api_key="sk-demo-secret"), path, crypto)
+    assert "sk-demo-secret" not in path.read_text(encoding="utf-8")
+    assert json.loads(path.read_text(encoding="utf-8"))["api_key_protected"]
+
+    monkeypatch.setattr(main_module.sys, "platform", "linux")
+    assert isinstance(main_module._build_environment(True)[1], NullCrypto)

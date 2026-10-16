@@ -46,7 +46,9 @@ def _is_admin() -> bool:
 def _build_environment(demo: bool) -> tuple[SystemAPI, Crypto, Path]:
     """System implementation, key encryption and config path for the chosen mode."""
     if _use_demo(demo):
-        return demo_system(), NullCrypto(), Path.home() / ".apptriage" / "config.json"
+        # a real API key is entered even in demo mode: keep it DPAPI-protected wherever DPAPI exists
+        crypto: Crypto = DpapiCrypto() if sys.platform == "win32" else NullCrypto()
+        return demo_system(), crypto, Path.home() / ".apptriage" / "config.json"
     from app_triage.sysapi.windows import WindowsSystem  # imports winreg: Windows only
     return WindowsSystem(), DpapiCrypto(), default_config_path()
 
