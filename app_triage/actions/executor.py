@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 from app_triage.models import ActionSpec
 from app_triage.safety.journal import FixSession, Journal, JournalEntry
-from app_triage.scanners.cmdline import is_microsoft
+from app_triage.scanners.cmdline import contains_microsoft_binary, is_microsoft
 from app_triage.sysapi.base import SystemAPI
 
 from .base import IRREVERSIBLE_MESSAGE, Action, error_message, resolve_fs_path
@@ -17,6 +17,9 @@ from .system_actions import (
 )
 
 RESTORE_POINT_DESCRIPTION = "AppTriage 修复前"
+# A quarantined folder is checked for Microsoft-signed binaries this deep / this many files.
+PROTECTED_DIR_DEPTH = 3
+PROTECTED_DIR_MAX_CHECKS = 40
 
 ACTIONS: dict[str, Action] = {a.kind: a for a in (
     DeleteRegValue(), DeleteRegKey(), SetRegValue(), ResetFileAssoc(), SetServiceStart(),
@@ -44,7 +47,11 @@ def _resolved(spec: ActionSpec, sys: SystemAPI) -> ActionSpec:
 
 
 def is_protected(spec: ActionSpec, sys: SystemAPI) -> bool:
-    """Quarantining anything under SystemRoot, or a Microsoft-signed file, is never allowed."""
+    """Quarantining anything under SystemRoot, a Microsoft-signed file, or a folder holding a
+    Microsoft-signed .exe/.dll (VC++ runtimes and the like aside) is never allowed.
+
+    Raises when the folder cannot be fully listed, so the executor fails closed.
+    """
     if spec.kind != "quarantine_path":
         return False
     path = resolve_fs_path(sys, spec.target)
@@ -52,7 +59,10 @@ def is_protected(spec: ActionSpec, sys: SystemAPI) -> bool:
     target, root = _fold(path), _fold(root)
     if target == root or target.startswith(root + "\\"):
         return True
-    return is_microsoft(sys.get_signature(path))
+    if is_microsoft(sys.get_signature(path)):
+        return True
+    return contains_microsoft_binary(sys, path, PROTECTED_DIR_DEPTH, PROTECTED_DIR_MAX_CHECKS,
+                                     strict=True)
 
 
 def _try_restore_point(sys: SystemAPI) -> bool:

@@ -209,3 +209,27 @@ def test_error_messages_are_chinese(tmp_path):
     r = execute(specs, s, Journal(tmp_path), YES)
     assert [e.message for e in r.entries] == [f"权限不足：{RUN}", f"未找到：{missing}",
                                               "操作失败：disk on fire"]
+
+
+def test_directory_holding_microsoft_signed_binary_is_protected(tmp_path):
+    s = FakeSystem()
+    q = lambda p: ActionSpec("quarantine_path", p)  # noqa: E731
+    ms = SignatureInfo("valid", "Microsoft Corporation")
+    s.set_signature(r"C:\Program Files\dotnet\shared\host\dotnet.exe", ms)  # depth 3
+    s.set_signature(r"C:\Users\tester\AppData\Roaming\kingsoft\vcruntime140.dll", ms)  # redistributable
+    s.add_file(r"C:\Users\tester\AppData\Roaming\kingsoft\wps.exe")
+    assert is_protected(q(r"C:\Program Files\dotnet"), s)
+    assert not is_protected(q(r"C:\Users\tester\AppData\Roaming\kingsoft"), s)
+    r = execute([q(r"C:\Program Files\dotnet")], s, Journal(tmp_path), YES)
+    assert (r.entries[0].status, r.entries[0].message) == ("failed", "受保护的系统文件，已拒绝")
+    assert s.path_exists(r"C:\Program Files\dotnet\shared\host\dotnet.exe")
+
+
+def test_directory_protection_walk_fails_closed(tmp_path):
+    s = FakeSystem()
+    s.add_file(r"C:\Program Files\Thing\a.exe")
+    s.add_file(r"C:\Program Files\Thing\locked\b.dll")
+    s.deny(r"C:\Program Files\Thing\locked")
+    r = execute([ActionSpec("quarantine_path", r"C:\Program Files\Thing")], s, Journal(tmp_path), YES)
+    assert r.entries[0].status == "failed" and "无法确认" in r.entries[0].message
+    assert s.path_exists(r"C:\Program Files\Thing\a.exe")

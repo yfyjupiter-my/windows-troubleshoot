@@ -1,6 +1,9 @@
+from dataclasses import replace
+
 from app_triage.models import ActionSpec, Risk
 from app_triage.scanners.base import SCANNERS, run_scan
 from app_triage.scanners.leftovers import scan_leftovers
+from app_triage.sysapi.base import SignatureInfo
 from app_triage.sysapi.fake import FakeSystem
 
 HKLM_U = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -150,3 +153,65 @@ def test_unowned_vendor_dir_under_owned_vendor_dir_not_duplicated():
     s.add_file(LOCAL + r"\Kingsoft\Old Thing\a", size=1)
     s.add_file(LOCAL + r"\Kingsoft\Old Thing\deep\b", size=1)
     assert [f.evidence["path"] for f in scan_leftovers(s)] == [LOCAL + r"\Kingsoft\Old Thing"]
+
+
+# ---- never offer Windows / Microsoft components for quarantine --------------------------------
+
+MS_SIG = SignatureInfo("valid", "Microsoft Corporation")
+
+
+def test_windows_component_dirs_skipped():
+    s = FakeSystem()
+    for root in (r"C:\Program Files", r"C:\Program Files (x86)"):
+        for d in ("dotnet", "MSBuild", "Reference Assemblies", "InstallShield Installation Information",
+                  "Windows Kits", "Microsoft SDKs", "IIS", "IIS Express", "Package Cache", "NuGet",
+                  "PackageManagement"):
+            s.add_file(rf"{root}\{d}\x.bin", size=1)
+    assert scan_leftovers(s) == []
+
+
+def test_unowned_folder_holding_microsoft_signed_binary_skipped():
+    s = FakeSystem()
+    s.set_signature(r"C:\Program Files\Azure Data Studio\azuredatastudio.exe", MS_SIG)
+    s.set_signature(r"C:\Program Files\VS Thing\bin\tool.dll", MS_SIG)  # depth 2 still checked
+    # bundling a Microsoft-signed VC++ runtime does not make a third-party folder a system one
+    s.set_signature(r"C:\Program Files\OldTool\vcruntime140.dll", MS_SIG)
+    s.add_file(r"C:\Program Files\OldTool\oldtool.exe", size=3)
+    found = [(f.evidence["path"], f.risk) for f in scan_leftovers(s)]
+    assert found == [(r"C:\Program Files\OldTool", Risk.LOW)]
+
+
+def test_microsoft_signed_check_is_bounded():
+    s = FakeSystem()
+    folder = r"C:\Program Files\BigTool"
+    for i in range(30):
+        s.add_file(rf"{folder}\a{i:02}.dll")
+    s.set_signature(rf"{folder}\z_ms.dll", MS_SIG)  # sorted after the first 20 binaries
+    checked = []
+    real = s.get_signature
+    s.get_signature = lambda p: checked.append(p) or real(p)
+    assert [f.evidence["path"] for f in scan_leftovers(s)] == [folder]
+    assert len(checked) <= 20
+
+
+def test_system_attribute_and_desktop_ini_only_dirs_skipped():
+    s = FakeSystem()
+    s.add_file(r"C:\Program Files\Localized\desktop.ini", hidden=True, system=True)
+    s.add_file(r"C:\Program Files\SysThing\x.bin", size=1)
+    real = s.list_dir
+
+    def with_system_attr(path):
+        return [replace(e, system=True) if e.name == "SysThing" else e for e in real(path)]
+
+    s.list_dir = with_system_attr
+    assert scan_leftovers(s) == []
+
+
+def test_short_app_names_own_their_program_files_folder():
+    s = FakeSystem()
+    s.add_key(HKLM_U + r"\7-Zip", {"DisplayName": "7-Zip 23.01 (x64)", "Publisher": "Igor Pavlov"})
+    s.add_file(r"C:\Program Files\7-Zip\7z.exe", size=1)
+    s.add_key(HKLM_U + r"\Git_is1", {"DisplayName": "Git", "Publisher": "The Git Development Community"})
+    s.add_file(r"C:\Program Files\Git\git-bash.exe", size=1)
+    s.add_file(r"C:\Program Files\Zap\zap.exe", size=1)  # unrelated short name: still reported
+    assert [f.evidence["path"] for f in scan_leftovers(s)] == [r"C:\Program Files\Zap"]
