@@ -77,3 +77,15 @@ def test_filesystem_reads(win):
     assert win.path_exists(os.path.join(root, "explorer.exe"))
     with pytest.raises(KeyError):
         win.list_dir(r"C:\AppTriage-smoke\missing")
+
+
+def test_powershell_runs_cleanly():
+    """Every helper relies on PowerShell exiting 0; show exactly what it printed if not."""
+    from app_triage.sysapi.windows import _SIGNATURE_PS, _powershell
+    from app_triage.sysapi.parsing import ps_quote
+
+    trivial = _powershell("Write-Output 'ok'")
+    assert (trivial.returncode, trivial.stdout.strip()) == (0, "ok"), (trivial.returncode, trivial.stdout, trivial.stderr)
+    exe = os.path.join(os.environ["SystemRoot"], "explorer.exe")
+    sig = _powershell(_SIGNATURE_PS.format(path=ps_quote(exe)))
+    assert sig.returncode == 0 and sig.stdout.strip(), (sig.returncode, sig.stdout, sig.stderr)

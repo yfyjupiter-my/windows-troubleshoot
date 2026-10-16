@@ -1,4 +1,5 @@
 import copy
+import tempfile
 import ntpath
 
 import pytest
@@ -16,9 +17,17 @@ WINLOGON = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 PHOTOS = "AppX43hnxtbyyps62jhe9sqpdzxn1790zetc"
 
 
+_TMP = ntpath.normcase(ntpath.normpath(tempfile.gettempdir()))
+
+
+def _near_tmp(key: str) -> bool:
+    """The quarantine folder lives under the real temp dir (on C: on Windows) — skip it and its ancestors."""
+    return any(a == b or a.startswith(b.rstrip("\\") + "\\") for a, b in ((key, _TMP), (_TMP, key)))
+
+
 def state(s: FakeSystem):
-    """Snapshot of the fake's user-visible state; the quarantine folder (not on C:) is excluded."""
-    fs = {k: v for k, v in s._fs.items() if k.startswith("c:")}
+    """Snapshot of the fake's user-visible state; the quarantine folder and the dirs leading to it are excluded."""
+    fs = {k: v for k, v in s._fs.items() if k.startswith("c:") and not _near_tmp(k)}
     return copy.deepcopy((s._reg, fs, s._content, s._services, s._tasks, s._shortcuts))
 
 
