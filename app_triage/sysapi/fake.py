@@ -209,6 +209,10 @@ class FakeSystem:
             entry = self._fs.pop(k)
             content = self._content.pop(k, None)
             new_path = dst_disp + entry.path[len(src_disp):]
+            nk = _fs_key(new_path)
+            for table in (self._shortcuts, self._signatures):
+                if k in table:
+                    table[nk] = table.pop(k)
             name = ntpath.basename(dst_disp) if k == sk else entry.name
             self._fs[_fs_key(new_path)] = replace(entry, name=name, path=new_path)
             if content is not None:
@@ -243,20 +247,24 @@ class FakeSystem:
 
     # ---- signatures, shortcuts, misc -----------------------------------
     def set_signature(self, path: str, info: SignatureInfo) -> None:
+        if not self.path_exists(path):
+            self.add_file(path)
         self._signatures[_fs_key(path)] = info
 
     def get_signature(self, file_path: str) -> SignatureInfo:
-        return self._signatures.get(_fs_key(file_path), SignatureInfo("unknown", ""))
+        key = _fs_key(file_path)
+        return self._signatures.get(key, SignatureInfo("unknown", "")) if key in self._fs \
+            else SignatureInfo("unknown", "")
 
     def add_shortcut(self, path: str, info: ShortcutInfo) -> None:
         self.add_file(path)
         self._shortcuts[_fs_key(path)] = info
 
     def read_shortcut(self, lnk: str) -> ShortcutInfo:
-        try:
-            return self._shortcuts[_fs_key(lnk)]
-        except KeyError:
-            raise KeyError(lnk) from None
+        key = _fs_key(lnk)
+        if key not in self._fs or key not in self._shortcuts:
+            raise KeyError(lnk)
+        return self._shortcuts[key]
 
     def set_shortcut_arguments(self, lnk: str, args: str) -> None:
         self._shortcuts[_fs_key(lnk)] = replace(self.read_shortcut(lnk), arguments=args)

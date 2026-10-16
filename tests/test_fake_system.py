@@ -158,3 +158,18 @@ def test_signature_shortcut_and_recorders():
     assert s.create_restore_point("before") is True
     s.open_uri("ms-settings:defaultapps"); s.launch("notepad.exe")
     assert (s.restore_points, s.opened_uris, s.launched) == (["before"], ["ms-settings:defaultapps"], ["notepad.exe"])
+
+
+def test_move_carries_shortcuts_and_signatures_and_reads_require_existing_file():
+    s = FakeSystem()
+    s.add_shortcut(r"C:\Desk\a.lnk", ShortcutInfo(r"C:\t.exe", "-x"))
+    s.set_signature(r"C:\Prog\App\run.exe", SignatureInfo("valid", "Acme"))
+    s.move(r"C:\Desk\a.lnk", r"D:\Q\a.lnk")
+    s.move(r"C:\Prog", r"D:\Q\Prog")
+    assert s.read_shortcut(r"D:\q\A.lnk") == ShortcutInfo(r"C:\t.exe", "-x")
+    s.set_shortcut_arguments(r"D:\Q\a.lnk", "-z")
+    assert s.read_shortcut(r"D:\Q\a.lnk").arguments == "-z"
+    assert s.get_signature(r"D:\Q\Prog\App\run.exe") == SignatureInfo("valid", "Acme")
+    with pytest.raises(KeyError): s.read_shortcut(r"C:\Desk\a.lnk")
+    with pytest.raises(KeyError): s.set_shortcut_arguments(r"C:\Desk\a.lnk", "")
+    assert s.get_signature(r"C:\Prog\App\run.exe") == SignatureInfo("unknown", "")
