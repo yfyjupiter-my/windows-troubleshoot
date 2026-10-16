@@ -37,6 +37,18 @@ def test_quoted_url_removed_and_taskbar_pin_scanned():
     assert f.actions[0].param("args") == "--new-window"
 
 
+def test_url_removal_preserves_other_whitespace_and_quoted_urls():
+    s = FakeSystem()
+    s.add_shortcut(DESKTOP + r"\A.lnk",
+                   ShortcutInfo(EDGE, '--user-data-dir="C:\\a  b" https://www.2345.com'))
+    s.add_shortcut(DESKTOP + r"\B.lnk",
+                   ShortcutInfo(EDGE, '--x=1  "https://hao123.com/a b"  --y="u http://z"'))
+    by = {f.evidence["path"]: f for f in scan_browser(s)}
+    assert by[DESKTOP + r"\A.lnk"].actions[0].param("args") == '--user-data-dir="C:\\a  b"'
+    # a URL inside a quoted value of another argument is not a URL token
+    assert by[DESKTOP + r"\B.lnk"].actions[0].param("args") == '--x=1  --y="u http://z"'
+
+
 def test_clean_shortcut_ignored():
     s = FakeSystem()
     s.add_shortcut(DESKTOP + r"\Edge.lnk", ShortcutInfo(EDGE, "--profile-directory=Default"))

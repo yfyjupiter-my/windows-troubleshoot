@@ -20,13 +20,21 @@ PREFERENCES = (  # (browser, path under LocalAppData)
 HIJACK_URL = re.compile(r"hao123|2345|360", re.IGNORECASE)
 
 
+# One argument: runs of non-space characters and "quoted segments" (which may hold spaces).
+_ARG = re.compile(r'(\s*)((?:"[^"]*"|[^\s"]|")+)')
+
+
 def _is_url_token(token: str) -> bool:
     return token.lstrip("\"'").lower().startswith(("http://", "https://"))
 
 
+def _has_url(args: str) -> bool:
+    return any(_is_url_token(m.group(2)) for m in _ARG.finditer(args))
+
+
 def _strip_urls(args: str) -> str:
-    """Drop whitespace-separated tokens that are http(s) URLs (optionally quoted)."""
-    return " ".join(t for t in args.split() if not _is_url_token(t))
+    """Remove http(s) URL arguments (optionally quoted), leaving all other text untouched."""
+    return _ARG.sub(lambda m: "" if _is_url_token(m.group(2)) else m.group(0), args).strip()
 
 
 def _shortcut_files(sys: SystemAPI, root: str) -> list[str]:
@@ -64,7 +72,7 @@ def _scan_shortcuts(sys: SystemAPI) -> list[Finding]:
                 continue
             if ntpath.basename(link.target.strip().strip('"')).lower() not in BROWSER_EXES:
                 continue
-            if not any(_is_url_token(t) for t in link.arguments.split()):
+            if not _has_url(link.arguments):
                 continue  # no bare URL argument to remove
             cleaned = _strip_urls(link.arguments)
             findings.append(Finding(
