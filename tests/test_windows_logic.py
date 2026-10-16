@@ -240,7 +240,7 @@ def app(tmp_path):
 
 
 def _tree(path):
-    return sorted(str(p.relative_to(path)) for p in path.rglob("*"))
+    return sorted(p.relative_to(path).as_posix() for p in path.rglob("*"))  # same on every OS
 
 
 def test_move_permission_error_is_access_denied_and_never_copies(monkeypatch, app):
