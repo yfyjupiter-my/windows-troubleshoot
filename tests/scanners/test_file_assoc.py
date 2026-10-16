@@ -130,3 +130,37 @@ def test_watched_exts_and_registration():
     assert WATCHED_EXTS[0] == ".jpg" and WATCHED_EXTS[-1] == ".pptx" and len(WATCHED_EXTS) == 18
     from app_triage.scanners.base import SCANNERS
     assert SCANNERS["file_assoc"][0] == "文件默认打开方式"
+
+
+def test_hkcr_fallback_only_is_info_waiting_for_the_users_choice():
+    s = FakeSystem()
+    s.add_key(FILEEXTS + r"\.gif")  # UserChoice gone (e.g. after reset_file_assoc)
+    s.add_key(r"HKCR\.gif", {"": "WPS.PIC.gif"})
+    s.add_key(r"HKCR\WPS.PIC.gif\shell\open\command", {"": WPS_CMD})
+    (f,) = scan_file_assoc(s)
+    assert f.title == ".gif 等待在“默认应用”中选择新的打开方式（当前仍为 WPS (金山办公)）"
+    assert f.risk == Risk.INFO
+    assert f.id == make_finding_id("file_assoc", ".gif")
+    assert [a.kind for a in f.actions] == ["reset_file_assoc"]
+
+
+def test_denied_userchoice_with_hkcr_fallback_stays_a_hijack():
+    s = FakeSystem()
+    set_assoc(s, ".png", "WPS.PIC.png", WPS_CMD)
+    s.add_key(r"HKCR\.png", {"": "WPS.PIC.png"})
+    s.deny(FILEEXTS + r"\.png\UserChoice")
+    (f,) = scan_file_assoc(s)
+    assert f.risk == Risk.MEDIUM and f.title == ".png 的默认打开方式被 WPS (金山办公) 占用"
+
+
+def test_reset_then_rescan_shows_waiting_not_hijacked(tmp_path):
+    from app_triage.actions import execute
+    from app_triage.safety.journal import Journal
+    s = FakeSystem()
+    set_assoc(s, ".png", "WPS.PIC.png", WPS_CMD)
+    s.add_key(r"HKCR\.png", {"": "WPS.PIC.png"})
+    (before,) = scan_file_assoc(s)
+    [entry] = execute(before.actions, s, Journal(tmp_path), lambda _: True).entries
+    assert entry.status == "applied"
+    (after,) = scan_file_assoc(s)
+    assert after.risk == Risk.INFO and "等待" in after.title

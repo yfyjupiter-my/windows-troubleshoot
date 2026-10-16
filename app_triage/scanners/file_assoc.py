@@ -28,8 +28,9 @@ def _default_value(sys: SystemAPI, key: str) -> str:
         return ""
 
 
-def _user_choice(sys: SystemAPI, ext: str) -> tuple[str, bool]:
-    """The effective ProgId for ext and whether UserChoice was access-denied (WPS locks it)."""
+def _user_choice(sys: SystemAPI, ext: str) -> tuple[str, bool, bool]:
+    """The effective ProgId for ext, whether UserChoice was access-denied (WPS locks it), and
+    whether the ProgId came only from the HKCR\\<ext> fallback (no readable UserChoice)."""
     denied = False
     try:
         progid = _text(sys.reg_values(f"{FILEEXTS}\\{ext}\\UserChoice").get("ProgId"))
@@ -37,9 +38,9 @@ def _user_choice(sys: SystemAPI, ext: str) -> tuple[str, bool]:
         progid = ""
     except AccessDenied:
         progid, denied = "", True
-    if not progid:
-        progid = _default_value(sys, rf"HKCR\{ext}")
-    return progid, denied
+    if progid:
+        return progid, denied, False
+    return _default_value(sys, rf"HKCR\{ext}"), denied, True
 
 
 def _open_with(sys: SystemAPI, ext: str) -> list[str]:
@@ -64,7 +65,7 @@ def scan_file_assoc(sys: SystemAPI) -> list[Finding]:
 def _ext_finding(sys: SystemAPI, ext: str) -> Finding | None:
     if not sys.reg_exists(f"{FILEEXTS}\\{ext}"):
         return None
-    progid, denied = _user_choice(sys, ext)
+    progid, denied, fallback = _user_choice(sys, ext)
     if not progid:
         return None
     command = _default_value(sys, rf"HKCR\{progid}\shell\open\command")
@@ -77,12 +78,19 @@ def _ext_finding(sys: SystemAPI, ext: str) -> Finding | None:
     if denied:
         evidence["acl"] = "denied"
     is_wps = rule.name.startswith("WPS")
+    if fallback and not denied:
+        # No UserChoice (e.g. just reset): Windows asks the user next time; HKCR is only the
+        # leftover default until then, so this is not (yet) a hijack.
+        title, risk = f"{ext} 等待在“默认应用”中选择新的打开方式（当前仍为 {rule.name}）", Risk.INFO
+    else:
+        title = f"{ext} 的默认打开方式被 {rule.name} 占用"
+        risk = Risk.INFO if is_wps and ext in OFFICE_EXTS else Risk.MEDIUM
     return Finding(
         id=make_finding_id("file_assoc", ext),
         category="file_assoc",
-        title=f"{ext} 的默认打开方式被 {rule.name} 占用",
+        title=title,
         evidence=evidence,
-        risk=Risk.INFO if is_wps and ext in OFFICE_EXTS else Risk.MEDIUM,
+        risk=risk,
         actions=[ActionSpec("reset_file_assoc", ext,
                             (("progid", progid), ("openwith", openwith)))],
         vendor=rule.name,
